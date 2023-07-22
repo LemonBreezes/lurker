@@ -1,269 +1,142 @@
---
--- lurker
---
--- Copyright (c) 2018 rxi
---
--- This library is free software; you can redistribute it and/or modify it
--- under the terms of the MIT license. See LICENSE for details.
---
+-- Make sure the shared library can be found through package.cpath before loading the module.
+-- For example, if you put it in the LÖVE save directory, you could do something like this:
+-- local lib_path = love.filesystem.getSaveDirectory() .. "/libraries"
+local lib_path = "./libraries"
+local extension = jit.os == "Windows" and "dll" or jit.os == "Linux" and "so" or jit.os == "OSX" and "dylib"
+package.cpath = string.format("%s;%s/?.%s", package.cpath, lib_path, extension)
+local imgui = require "cimgui"
 
--- Assumes lume is in the same directory as this file if it does not exist
--- as a global
-local lume = rawget(_G, "lume") or require((...):gsub("[^/.\\]+$", "lume"))
+local sti = require "sti"
 
-local lurker = { _version = "1.0.1" }
-
-
-local dir = love.filesystem.enumerate or love.filesystem.getDirectoryItems
-local time = love.timer.getTime or os.time
-
-local function isdir(path)
-    local info = love.filesystem.getInfo(path)
-    return info.type == "directory"
+local lurker = require "lurker"
+lurker.postswap = function(file)
+	-- reinit game here
+    map = sti("assets/maps/world.lua")
 end
 
-local function lastmodified(path)
-    local info = love.filesystem.getInfo(path, "file")
-    return info.modtime
+love.load = function()
+	love.window.setTitle("Cool Video Game")
+    imgui.love.Init()
+
+	local imio = imgui.GetIO()
+	imio.ConfigFlags = imgui.love.ConfigFlags("NavEnableKeyboard", "DockingEnable")
+
+    map = sti("assets/maps/world.lua")
 end
 
-local lovecallbacknames = {
-  "update",
-  "load",
-  "draw",
-  "mousepressed",
-  "mousereleased",
-  "keypressed",
-  "keyreleased",
-  "focus",
-  "quit",
-}
+love.draw = function()
+	-- draw game here
+    local game_canvas = love.graphics.newCanvas()
+    love.graphics.setCanvas(game_canvas)
+    map:draw(-60, -20, 8, 8)
+    love.graphics.setCanvas()
+    local size = imgui.ImVec2_Float(game_canvas:getDimensions())
 
+	local viewport = imgui.GetMainViewport()
+	imgui.DockSpaceOverViewport(viewport)
 
-function lurker.init()
-  lurker.print("Initing lurker")
-  lurker.path = "."
-  lurker.preswap = function() end
-  lurker.postswap = function() end
-  lurker.interval = .5
-  lurker.protected = true
-  lurker.quiet = false
-  lurker.lastscan = 0
-  lurker.lasterrorfile = nil
-  lurker.files = {}
-  lurker.funcwrappers = {}
-  lurker.lovefuncs = {}
-  lurker.state = "init"
-  lume.each(lurker.getchanged(), lurker.resetfile)
-  return lurker
-end
-
-
-function lurker.print(...)
-  print("[lurker] " .. lume.format(...))
-end
-
-
-function lurker.listdir(path, recursive, skipdotfiles)
-  path = (path == ".") and "" or path
-  local function fullpath(x) return path .. "/" .. x end
-  local t = {}
-  for _, f in pairs(lume.map(dir(path), fullpath)) do
-    if not skipdotfiles or not f:match("/%.[^/]*$") then
-      if recursive and isdir(f) then
-        t = lume.concat(t, lurker.listdir(f, true, true))
-      else
-        table.insert(t, lume.trim(f, "/"))
-      end
+    -- draw windows here
+    if imgui.Begin("Game") then
+        imgui.Image(game_canvas, size)
     end
-  end
-  return t
+    imgui.End()
+    imgui.ShowDemoWindow()
+
+    -- code to render imgui
+    imgui.Render()
+    imgui.love.RenderDrawLists()
 end
 
+love.update = function(dt)
+    print(dt)
+	lurker.update()
+    imgui.love.Update(dt)
+    imgui.NewFrame()
 
-function lurker.initwrappers()
-  for _, v in pairs(lovecallbacknames) do
-    lurker.funcwrappers[v] = function(...)
-      local args = {...}
-      xpcall(function()
-        return lurker.lovefuncs[v] and lurker.lovefuncs[v](unpack(args))
-      end, lurker.onerror)
+    map:update(dt)
+end
+
+love.mousemoved = function(x, y, ...)
+    imgui.love.MouseMoved(x, y)
+    if not imgui.love.GetWantCaptureMouse() then
+        -- your code here
     end
-    lurker.lovefuncs[v] = love[v]
-  end
-  lurker.updatewrappers()
 end
 
-
-function lurker.updatewrappers()
-  for _, v in pairs(lovecallbacknames) do
-    if love[v] ~= lurker.funcwrappers[v] then
-      lurker.lovefuncs[v] = love[v]
-      love[v] = lurker.funcwrappers[v]
+love.mousepressed = function(x, y, button, ...)
+    imgui.love.MousePressed(button)
+    if not imgui.love.GetWantCaptureMouse() then
+        -- your code here 
     end
-  end
 end
 
-
-function lurker.onerror(e, nostacktrace)
-  lurker.print("An error occurred; switching to error state")
-  lurker.state = "error"
-
-  -- Release mouse
-  local setgrab = love.mouse.setGrab or love.mouse.setGrabbed
-  setgrab(false)
-
-  -- Set up callbacks
-  for _, v in pairs(lovecallbacknames) do
-    love[v] = function() end
-  end
-
-  love.update = lurker.update
-
-  love.keypressed = function(k)
-    if k == "escape" then
-      lurker.print("Exiting...")
-      love.event.quit()
+love.mousereleased = function(x, y, button, ...)
+    imgui.love.MouseReleased(button)
+    if not imgui.love.GetWantCaptureMouse() then
+        -- your code here 
     end
-  end
+end
 
-  local stacktrace = nostacktrace and "" or
-                     lume.trim((debug.traceback("", 2):gsub("\t", "")))
-  local msg = lume.format("{1}\n\n{2}", {e, stacktrace})
-  local colors = {
-    { lume.color("#1e1e2c", 256) },
-    { lume.color("#f0a3a3", 256) },
-    { lume.color("#92b5b0", 256) },
-    { lume.color("#66666a", 256) },
-    { lume.color("#cdcdcd", 256) },
-  }
-  love.graphics.reset()
-  love.graphics.setFont(love.graphics.newFont(12))
-
-  love.draw = function()
-    local pad = 25
-    local width = love.graphics.getWidth()
-
-    local function drawhr(pos, color1, color2)
-      local animpos = lume.smooth(pad, width - pad - 8, lume.pingpong(time()))
-      if color1 then love.graphics.setColor(color1) end
-      love.graphics.rectangle("fill", pad, pos, width - pad*2, 1)
-      if color2 then love.graphics.setColor(color2) end
-      love.graphics.rectangle("fill", animpos, pos, 8, 1)
+love.wheelmoved = function(x, y)
+    imgui.love.WheelMoved(x, y)
+    if not imgui.love.GetWantCaptureMouse() then
+        -- your code here 
     end
+end
 
-    local function drawtext(str, x, y, color, limit)
-      love.graphics.setColor(color)
-      love.graphics[limit and "printf" or "print"](str, x, y, limit)
+love.keypressed = function(key, ...)
+    imgui.love.KeyPressed(key)
+    if not imgui.love.GetWantCaptureKeyboard() then
+        -- your code here 
     end
-
-    love.graphics.setBackgroundColor(colors[1])
-    love.graphics.clear()
-
-    drawtext("An error has occurred", pad, pad, colors[2])
-    drawtext("lurker", width - love.graphics.getFont():getWidth("lurker") -
-             pad, pad, colors[4])
-    drawhr(pad + 32, colors[4], colors[5])
-    drawtext("If you fix the problem and update the file the program will " ..
-             "resume", pad, pad + 46, colors[3])
-    drawhr(pad + 72, colors[4], colors[5])
-    drawtext(msg, pad, pad + 90, colors[5], width - pad * 2)
-
-    love.graphics.reset()
-  end
 end
 
-
-function lurker.exitinitstate()
-  lurker.state = "normal"
-  if lurker.protected then
-    lurker.initwrappers()
-  end
-end
-
-
-function lurker.exiterrorstate()
-  lurker.state = "normal"
-  for _, v in pairs(lovecallbacknames) do
-    love[v] = lurker.funcwrappers[v]
-  end
-end
-
-
-function lurker.update()
-  if lurker.state == "init" then
-    lurker.exitinitstate()
-  end
-  local diff = time() - lurker.lastscan
-  if diff > lurker.interval then
-    lurker.lastscan = lurker.lastscan + diff
-    local changed = lurker.scan()
-    if #changed > 0 and lurker.lasterrorfile then
-      local f = lurker.lasterrorfile
-      lurker.lasterrorfile = nil
-      lurker.hotswapfile(f)
+love.keyreleased = function(key, ...)
+    imgui.love.KeyReleased(key)
+    if not imgui.love.GetWantCaptureKeyboard() then
+        -- your code here 
     end
-  end
 end
 
-
-function lurker.getchanged()
-  local function fn(f)
-    return f:match("%.lua$") and lurker.files[f] ~= lastmodified(f)
-  end
-  return lume.filter(lurker.listdir(lurker.path, true, true), fn)
-end
-
-
-function lurker.modname(f)
-  return (f:gsub("%.lua$", ""):gsub("[/\\]", "."))
-end
-
-
-function lurker.resetfile(f)
-  lurker.files[f] = lastmodified(f)
-end
-
-
-function lurker.hotswapfile(f)
-  lurker.print("Hotswapping '{1}'...", {f})
-  if lurker.state == "error" then
-    lurker.exiterrorstate()
-  end
-  if lurker.preswap(f) then
-    lurker.print("Hotswap of '{1}' aborted by preswap", {f})
-    lurker.resetfile(f)
-    return
-  end
-  local modname = lurker.modname(f)
-  local t, ok, err = lume.time(lume.hotswap, modname)
-  if ok then
-    lurker.print("Swapped '{1}' in {2} secs", {f, t})
-  else
-    lurker.print("Failed to swap '{1}' : {2}", {f, err})
-    if not lurker.quiet and lurker.protected then
-      lurker.lasterrorfile = f
-      lurker.onerror(err, true)
-      lurker.resetfile(f)
-      return
+love.textinput = function(t)
+    -- only use imgui.love.TextInput when characters are expected
+    if imgui.love.GetWantCaptureKeyboard() then
+        imgui.love.TextInput(t)
+    else
+        -- your code here 
     end
-  end
-  lurker.resetfile(f)
-  lurker.postswap(f)
-  if lurker.protected then
-    lurker.updatewrappers()
-  end
 end
 
-
-function lurker.scan()
-  if lurker.state == "init" then
-    lurker.exitinitstate()
-  end
-  local changed = lurker.getchanged()
-  lume.each(changed, lurker.hotswapfile)
-  return changed
+love.quit = function()
+    return imgui.love.Shutdown()
 end
 
+-- for gamepad support also add the following:
 
-return lurker.init()
+love.joystickadded = function(joystick)
+    imgui.love.JoystickAdded(joystick)
+    -- your code here 
+end
+
+love.joystickremoved = function(joystick)
+    imgui.love.JoystickRemoved()
+    -- your code here 
+end
+
+love.gamepadpressed = function(joystick, button)
+    imgui.love.GamepadPressed(button)
+    -- your code here 
+end
+
+love.gamepadreleased = function(joystick, button)
+    imgui.love.GamepadReleased(button)
+    -- your code here 
+end
+
+-- choose threshold for considering analog controllers active, defaults to 0 if unspecified
+local threshold = 0.2 
+
+love.gamepadaxis = function(joystick, axis, value)
+    imgui.love.GamepadAxis(axis, value, threshold)
+    -- your code here 
+end
